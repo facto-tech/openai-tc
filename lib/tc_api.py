@@ -48,7 +48,7 @@ Technical Specification:
             {"role": "user", "content": prompt}
         ],
         temperature=0.2,
-        max_tokens=1500
+        max_tokens=7500
     )
 
     return response['choices'][0]['message']['content']
