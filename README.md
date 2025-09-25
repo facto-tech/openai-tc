@@ -20,6 +20,21 @@ Outputs are uploaded to the output folder
 
 # Example
 
-`python tc_api.py your_spec.docx`
+To run the webUI use the below:
+
+`streamlit run tc_api.py` from the lib folder
+
+# Development options
+## Run with auto-rerun enabled
+`streamlit run app.py --server.runOnSave true`
+
+## Run on a specific port
+`streamlit run app.py --server.port 8502`
+
+## Run in development mode with more verbose logging
+`streamlit run app.py --logger.level debug`
+
+##  Disable CORS (useful for development)
+`streamlit run app.py --server.enableCORS false`
 
 

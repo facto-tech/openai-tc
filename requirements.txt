@@ -1,4 +1,6 @@
-openai
-fastapi
-python-docx
+streamlit
+openai==0.28.1
 PyMuPDF
+python-docx
+python-dotenv
+pillow
