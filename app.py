@@ -13,19 +13,112 @@ from datetime import datetime
 import subprocess
 import platform
 import time
+import atexit
+import shutil
+import gc
 
-# Load environment variables
+# Load environment variables for development
 load_dotenv()
+
+# Import secure configuration
+try:
+    from secure_config import setup_openai
+    USING_SECURE_CONFIG = True
+    CONFIG_TYPE = "AWS"
+except ImportError:
+    try:
+        from gcp_secure_config import setup_openai
+        USING_SECURE_CONFIG = True
+        CONFIG_TYPE = "GCP"
+    except ImportError:
+        USING_SECURE_CONFIG = False
+        CONFIG_TYPE = "LOCAL"
 
 # Page config
 st.set_page_config(
     page_title="Facto AI Test Case Generator",
     page_icon="🧪",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Initialize OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Initialize OpenAI securely
+if USING_SECURE_CONFIG:
+    # Production: Use secure configuration
+    setup_openai()
+else:
+    # Development: Use environment variable
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# Global temp directory tracking
+TEMP_FILES = []
+
+def cleanup_temp_files():
+    """Clean up all temporary files"""
+    global TEMP_FILES
+    for temp_file in TEMP_FILES:
+        try:
+            if os.path.exists(temp_file):
+                os.unlink(temp_file)
+        except:
+            pass
+    TEMP_FILES.clear()
+
+# Register cleanup function to run on exit
+atexit.register(cleanup_temp_files)
+
+# Import user management system
+try:
+    # Check if we're in production (Firestore available)
+    from google.cloud import firestore
+    firestore.Client(project=os.getenv('GOOGLE_CLOUD_PROJECT'))
+    
+    # If we get here, Firestore is available - use production auth
+    from user_management import (
+        check_authentication, login_form, get_current_user, has_permission,
+        user_management_panel, logout, init_super_admin
+    )
+    USING_PRODUCTION_AUTH = True
+    
+except Exception as e:
+    # Firestore not available - use development auth
+    # Simple development authentication
+    def check_authentication():
+        return st.session_state.get('dev_authenticated', False)
+    
+    def login_form():
+        st.title("🔐 Facto AI - Development Login")
+        st.warning("🧪 Running in development mode (Firestore unavailable)")
+        
+        if st.button("Quick Login (Admin)"):
+            st.session_state.dev_authenticated = True
+            st.session_state.user_data = {
+                'email': 'admin@facto.com.au', 
+                'role': 'super_admin',
+                'login_count': 1
+            }
+            st.rerun()
+    
+    def get_current_user():
+        return st.session_state.get('user_data', {})
+    
+    def has_permission(role='user'):
+        return check_authentication()
+    
+    def logout():
+        st.session_state.dev_authenticated = False
+        st.session_state.user_data = None
+        st.rerun()
+    
+    def user_management_panel():
+        st.header("👥 User Management")
+        st.warning("🧪 Development mode - user management disabled")
+        st.info("Enable Firestore to access full user management features")
+    
+    def init_super_admin():
+        pass
+    
+    USING_PRODUCTION_AUTH = False
 
 # --- Helper Functions ---
 def extract_text_from_pdf(filepath) -> str:
@@ -182,7 +275,7 @@ Vision analysis failed ({str(e)}). Please manually describe this process map inc
 MANUAL INPUT NEEDED: Please replace the sections above with actual content from the process map, then re-run the test case generation.
 """
 
-def generate_test_cases(spec_text: str, document_type: str, output_format: str, model: str = "gpt-3.5-turbo") -> str:
+def generate_test_cases(spec_text: str, document_type: str, output_format: str, model: str = "gpt-3.5-turbo", target_system: str = None) -> str:
     format_instructions = {
         "markdown": "Format the output as clean Markdown tables",
         "csv": "Format the output as CSV with proper delimiters",
@@ -190,14 +283,62 @@ def generate_test_cases(spec_text: str, document_type: str, output_format: str, 
         "excel": "Format the output as tab-separated values suitable for Excel import"
     }
     
+    # System-specific context
+    system_context = ""
+    if target_system and target_system != "General":
+        system_contexts = {
+            "Oracle": """
+Consider Oracle-specific aspects:
+- Database integrity constraints and triggers
+- PL/SQL stored procedures and packages
+- Oracle Forms/APEX UI validation
+- Concurrent program execution
+- Data security and user privileges
+- Performance implications of queries
+""",
+            "SAP": """
+Consider SAP-specific aspects:
+- Transaction codes (T-codes) and user exits
+- ABAP custom code and BAPIs
+- Authorization objects and roles
+- Integration with other SAP modules
+- Batch job processing
+- Customizing and configuration tables
+""",
+            "Salesforce": """
+Consider Salesforce-specific aspects:
+- Validation rules and field dependencies
+- Workflow rules and process builder flows
+- Apex triggers and classes
+- Profile and permission set security
+- Lightning component functionality
+- API integration limits
+- Governor limits and bulk processing
+""",
+            "MuleSoft": """
+Consider MuleSoft-specific aspects:
+- API endpoint validation
+- Data transformation and mapping
+- Error handling and retry logic
+- Authentication and security policies
+- Rate limiting and throttling
+- Integration flow orchestration
+- Message payload validation
+"""
+        }
+        system_context = system_contexts.get(target_system, "")
+    
+    system_info = f"\n\nTarget System: {target_system}\n{system_context}" if target_system and target_system != "General" else ""
+    
     prompt = f"""
-You are a senior QA engineer. Based on the following {document_type}, generate comprehensive test cases.
+You are a senior QA engineer with expertise in enterprise systems testing. Based on the following {document_type}, generate comprehensive test cases.
 
 {format_instructions[output_format]}
 
 Use these columns: Test Case ID | Title | Description | Preconditions | Steps | Expected Result | Priority | Test Type
+{system_info}
 
-Include various test types: Functional, Boundary, Negative, Integration, User Acceptance
+Include various test types: Functional, Boundary, Negative, Integration, User Acceptance, System-Specific
 
 {document_type.title()}:
 {spec_text}
@@ -210,7 +351,7 @@ Include various test types: Functional, Boundary, Negative, Integration, User Ac
             response = openai.ChatCompletion.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are a senior QA engineer with expertise in test case design."},
+                    {"role": "system", "content": f"You are a senior QA engineer with expertise in test case design{' and ' + target_system + ' systems' if target_system and target_system != 'General' else ''}."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.2,
@@ -228,13 +369,17 @@ Include various test types: Functional, Boundary, Negative, Integration, User Ac
         except Exception as e:
             raise e
 
-def process_uploaded_file(uploaded_file, output_format, model_choice, enable_vision):
+def process_uploaded_file(uploaded_file, output_format, model_choice, enable_vision, target_system):
     """Process a single uploaded file and return test cases"""
+    global TEMP_FILES
+    tmp_path = None
+    
     try:
-        # Create temporary file
+        # Create temporary file with better cleanup tracking
         with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{uploaded_file.name}") as tmp_file:
             tmp_file.write(uploaded_file.getvalue())
             tmp_path = tmp_file.name
+            TEMP_FILES.append(tmp_path)  # Track for cleanup
         
         # Determine file type and extract content
         filename = uploaded_file.name.lower()
@@ -257,32 +402,93 @@ def process_uploaded_file(uploaded_file, output_format, model_choice, enable_vis
         else:
             return None, "Unsupported file format"
         
-        # Generate test cases
-        test_cases = generate_test_cases(extracted_text, doc_type, output_format, model_choice)
-        
-        # Clean up temp file
-        os.unlink(tmp_path)
+        # Generate test cases with system context
+        test_cases = generate_test_cases(extracted_text, doc_type, output_format, model_choice, target_system)
         
         return test_cases, None
         
     except Exception as e:
         return None, str(e)
+    
+    finally:
+        # Ensure cleanup happens even if there's an error
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+                if tmp_path in TEMP_FILES:
+                    TEMP_FILES.remove(tmp_path)
+            except:
+                pass
+        
+        # Force garbage collection for large files
+        gc.collect()
 
-# --- Streamlit UI ---
-def main():
-    st.image("assets/Facto_site_header.webp")
+# --- Main Application ---
+def main_app():
+    """Main application after authentication"""
+    
+    current_user = get_current_user()
+    user_email = current_user.get('email', 'Unknown')
+    user_role = current_user.get('role', 'user')
+    
+    # Header with user info
+    col1, col2, col3 = st.columns([3, 2, 1])
+    with col1:
+        # Handle missing header image gracefully
+        header_path = "assets/Facto_site_header.webp"
+        if os.path.exists(header_path):
+            st.image(header_path)
+        else:
+            st.markdown("# 🧪 FACTO AI")
+    with col2:
+        st.write(f"👤 **Logged in as:** {user_email}")
+        st.write(f"🏷️ **Role:** {user_role.replace('_', ' ').title()}")
+    with col3:
+        if st.button("🚪 Logout"):
+            logout()
+
     st.title("🧪 Facto AI Test Case Generator")
     st.markdown("Upload your documents or process maps to automatically generate comprehensive test cases using AI.")
     
+    # Sidebar for navigation and configuration
+    st.sidebar.header("🧭 Navigation")
+    
+    # Navigation menu
+    if has_permission('admin'):
+        nav_options = ["🧪 Test Case Generator", "👥 User Management"]
+    else:
+        nav_options = ["🧪 Test Case Generator"]
+    
+    selected_nav = st.sidebar.radio("Select Section:", nav_options)
+    
+    if selected_nav == "👥 User Management":
+        user_management_panel()
+        return
+    
+    # Main test case generator interface
+    test_case_generator_interface()
+
+def test_case_generator_interface():
+    """Test case generator interface"""
+    
     # Sidebar for configuration
-    st.sidebar.header("Configuration")
+    st.sidebar.markdown("---")
+    st.sidebar.header("⚙️ Configuration")
+    
+    # Show auth status
+    if USING_PRODUCTION_AUTH:
+        st.sidebar.success("✅ Production mode (Firestore)")
+    else:
+        st.sidebar.warning("⚠️ Development mode")
     
     # API Key check
-    if not openai.api_key:
-        st.sidebar.error("⚠️ API key not found. Please check and reload.")
-        st.stop()
+    if USING_SECURE_CONFIG:
+        st.sidebar.success(f"✅ API key loaded securely ({CONFIG_TYPE})")
+    elif openai.api_key:
+        st.sidebar.success("✅ API key loaded (development)")
     else:
-        st.sidebar.success("✅ API key loaded")
+        st.sidebar.error("⚠️ API key not found. Please check configuration.")
+        st.stop()
     
     # Vision API toggle
     enable_vision = st.sidebar.checkbox(
@@ -314,6 +520,19 @@ def main():
     if enable_vision and model_choice not in ["gpt-4", "gpt-4o", "gpt-4-vision-preview"]:
         st.sidebar.warning("⚠️ Selected model may not support vision analysis. Consider GPT-4o for best results.")
     
+    # Target system selection
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🎯 Target System")
+    
+    target_system = st.sidebar.selectbox(
+        "Select System",
+        ["General", "Oracle", "SAP", "Salesforce", "MuleSoft"],
+        help="Select the target system for more specific test cases"
+    )
+    
+    if target_system != "General":
+        st.sidebar.info(f"✅ Generating {target_system}-specific test cases")
+    
     # Output format selection
     output_format = st.sidebar.selectbox(
         "Output Format",
@@ -321,7 +540,40 @@ def main():
         help="Choose how you want the test cases formatted"
     )
     
-    # File upload
+    # Usage statistics for current user
+    current_user = get_current_user()
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📊 Your Usage")
+    st.sidebar.info(f"Login Count: {current_user.get('login_count', 0)}")
+    if current_user.get('last_login'):
+        try:
+            st.sidebar.info(f"Last Login: {current_user['last_login'].strftime('%Y-%m-%d %H:%M')}")
+        except:
+            st.sidebar.info("Last Login: Available")
+    
+    # Storage management section
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🧹 Storage Management")
+    
+    # Show temp file count
+    temp_file_count = len([f for f in TEMP_FILES if os.path.exists(f)])
+    if temp_file_count > 0:
+        st.sidebar.warning(f"⚠️ {temp_file_count} temp files in memory")
+    
+    # Manual cleanup button
+    if st.sidebar.button("🗑️ Clear Temp Files"):
+        cleanup_temp_files()
+        st.sidebar.success("✅ Temp files cleared!")
+        st.rerun()
+    
+    # Clear Streamlit cache
+    if st.sidebar.button("🔄 Clear Cache"):
+        st.cache_data.clear()
+        st.sidebar.success("✅ Cache cleared!")
+    
+    st.sidebar.markdown("---")
+    
+    # File upload section
     st.header("📁 Upload Documents")
     
     uploaded_files = st.file_uploader(
@@ -358,7 +610,7 @@ def main():
                     st.info("⏳ Waiting to respect API rate limits...")
                     time.sleep(2)  # 2-second delay between files
                 
-                test_cases, error = process_uploaded_file(uploaded_file, output_format, model_choice, enable_vision)
+                test_cases, error = process_uploaded_file(uploaded_file, output_format, model_choice, enable_vision, target_system)
                 
                 if error:
                     st.error(f"❌ Error processing {uploaded_file.name}: {error}")
@@ -453,6 +705,21 @@ def download_all_results(results, output_format):
         file_name=f"test_cases_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
         mime="application/zip"
     )
+
+# --- Main Application Logic ---
+def main():
+    """Main application entry point"""
+    
+    # Initialize super admin on first run
+    if 'super_admin_initialized' not in st.session_state:
+        init_super_admin()
+        st.session_state.super_admin_initialized = True
+    
+    # Check authentication
+    if not check_authentication():
+        login_form()
+    else:
+        main_app()
 
 if __name__ == "__main__":
     main()

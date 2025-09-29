@@ -1,6 +1,21 @@
-streamlit
+# requirements.txt for Facto AI Test Case Generator
+# Core Streamlit and OpenAI
+streamlit>=1.29.0
 openai==0.28.1
-PyMuPDF
-python-docx
-python-dotenv
-pillow
+
+# Document processing
+PyMuPDF>=1.23.0
+python-docx>=0.8.11
+docx2txt>=0.8
+pillow>=10.0.0
+
+# Environment and configuration
+python-dotenv>=1.0.0
+
+# Google Cloud services
+google-cloud-secret-manager>=2.16.0
+google-cloud-firestore>=2.11.0
+google-auth>=2.17.0
+
+# Additional utilities (if needed)
+requests>=2.31.0
