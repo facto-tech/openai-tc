@@ -17,5 +17,7 @@ google-cloud-secret-manager>=2.16.0
 google-cloud-firestore>=2.11.0
 google-auth>=2.17.0
 
-# Additional utilities (if needed)
+# Additional utilities
 requests>=2.31.0
+pandas
+openpyxl

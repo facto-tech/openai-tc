@@ -16,6 +16,7 @@ import time
 import atexit
 import shutil
 import gc
+import pandas as pd
 
 # Load environment variables for development
 load_dotenv()
@@ -180,6 +181,44 @@ def encode_image_to_base64(filepath) -> str:
     with open(filepath, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
+def extract_template_structure(template_file) -> dict:
+    """Extract column structure from Excel/CSV template"""
+    try:
+        # Save uploaded file to temp location
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(template_file.name)[1]) as tmp_file:
+            tmp_file.write(template_file.getvalue())
+            tmp_path = tmp_file.name
+            TEMP_FILES.append(tmp_path)
+        
+        # Read the template
+        if template_file.name.endswith('.xlsx') or template_file.name.endswith('.xls'):
+            df = pd.read_excel(tmp_path, nrows=5)  # Read first few rows to understand structure
+        elif template_file.name.endswith('.csv'):
+            df = pd.read_csv(tmp_path, nrows=5)
+        else:
+            return None
+        
+        # Extract column names and sample data
+        columns = df.columns.tolist()
+        sample_data = df.head(2).to_dict('records') if not df.empty else []
+        
+        return {
+            'columns': columns,
+            'sample_data': sample_data,
+            'column_count': len(columns)
+        }
+    except Exception as e:
+        st.error(f"Error reading template: {str(e)}")
+        return None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+                if tmp_path in TEMP_FILES:
+                    TEMP_FILES.remove(tmp_path)
+            except:
+                pass
+
 def process_image_with_vision(filepath, model="gpt-4o") -> str:
     """Use OpenAI Vision API to analyze process maps/diagrams"""
     try:
@@ -275,13 +314,30 @@ Vision analysis failed ({str(e)}). Please manually describe this process map inc
 MANUAL INPUT NEEDED: Please replace the sections above with actual content from the process map, then re-run the test case generation.
 """
 
-def generate_test_cases(spec_text: str, document_type: str, output_format: str, model: str = "gpt-3.5-turbo", target_system: str = None) -> str:
-    format_instructions = {
-        "markdown": "Format the output as clean Markdown tables",
-        "csv": "Format the output as CSV with proper delimiters",
-        "json": "Format the output as structured JSON with proper schema",
-        "excel": "Format the output as tab-separated values suitable for Excel import"
-    }
+def generate_test_cases(spec_text: str, document_type: str, output_format: str, model: str = "gpt-3.5-turbo", 
+                       target_system: str = None, additional_context: str = None, template_structure: dict = None) -> str:
+    """Generate test cases with optional template structure and additional context"""
+    
+    # Format instructions based on template or default format
+    if template_structure:
+        columns = template_structure['columns']
+        format_instructions = f"""
+Format the output to match this EXACT template structure with these columns in order:
+{', '.join(columns)}
+
+IMPORTANT: 
+- Use EXACTLY these column names as provided
+- Maintain the exact order of columns
+- Fill every column appropriately based on its name
+- If a column's purpose is unclear, make a reasonable interpretation based on the column name
+"""
+    else:
+        format_instructions = {
+            "markdown": "Format the output as clean Markdown tables",
+            "csv": "Format the output as CSV with proper delimiters",
+            "json": "Format the output as structured JSON with proper schema",
+            "excel": "Format the output as tab-separated values suitable for Excel import"
+        }[output_format]
     
     # System-specific context
     system_context = ""
@@ -330,15 +386,42 @@ Consider MuleSoft-specific aspects:
     
     system_info = f"\n\nTarget System: {target_system}\n{system_context}" if target_system and target_system != "General" else ""
     
+    # Additional context from user (optional)
+    additional_info = f"\n\nAdditional Context and Requirements:\n{additional_context}" if additional_context and additional_context.strip() else ""
+    
+    # Default columns if no template provided
+    default_columns = "Test Case ID | Title | Description | Preconditions | Steps | Expected Result | Priority | Test Type"
+    columns_instruction = f"Use these columns: {default_columns}" if not template_structure else ""
+    
     prompt = f"""
-You are a senior QA engineer with expertise in enterprise systems testing. Based on the following {document_type}, generate comprehensive test cases.
+You are a senior QA engineer with expertise in enterprise systems testing. Based on the following {document_type}, generate **highly detailed** and **comprehensive** test cases.
 
-{format_instructions[output_format]}
+{format_instructions}
 
-Use these columns: Test Case ID | Title | Description | Preconditions | Steps | Expected Result | Priority | Test Type
+{columns_instruction}
 {system_info}
+{additional_info}
 
-Include various test types: Functional, Boundary, Negative, Integration, User Acceptance, System-Specific
+### Instructions for level of detail:
+- Each step should describe the **exact user/system action** and expected intermediate response.
+- Each generated test case should have at least 5 steps
+- Include **input data, UI interactions, and expected screen changes** when relevant.
+- Ensure **negative, boundary, and alternate path tests** are well represented.
+- Write **clear, professional QA language**, suitable for test management tools.
+- Include **explicit validation criteria** in the "Expected Result".
+- Prefer realistic naming conventions for Test Case IDs (e.g., TC_LOGIN_001).
+- Break down every user interaction into **atomic steps** (one action per step).
+- For example, instead of "Login to the system," use steps like:
+  1. Navigate to login page.
+  2. Enter username.
+  3. Enter password.
+  4. Click "Sign In."
+  5. Wait for dashboard to load.
+  6. Verify welcome message is displayed.
+
+Include a mix of test types: Functional, Boundary, Negative, Integration, User Acceptance, and System-Specific.
+
+Now analyze the following {document_type} and generate the detailed test cases accordingly:
 
 {document_type.title()}:
 {spec_text}
@@ -369,7 +452,8 @@ Include various test types: Functional, Boundary, Negative, Integration, User Ac
         except Exception as e:
             raise e
 
-def process_uploaded_file(uploaded_file, output_format, model_choice, enable_vision, target_system):
+def process_uploaded_file(uploaded_file, output_format, model_choice, enable_vision, target_system, 
+                         additional_context=None, template_structure=None):
     """Process a single uploaded file and return test cases"""
     global TEMP_FILES
     tmp_path = None
@@ -402,8 +486,16 @@ def process_uploaded_file(uploaded_file, output_format, model_choice, enable_vis
         else:
             return None, "Unsupported file format"
         
-        # Generate test cases with system context
-        test_cases = generate_test_cases(extracted_text, doc_type, output_format, model_choice, target_system)
+        # Generate test cases with additional context and template
+        test_cases = generate_test_cases(
+            extracted_text, 
+            doc_type, 
+            output_format, 
+            model_choice, 
+            target_system,
+            additional_context,
+            template_structure
+        )
         
         return test_cases, None
         
@@ -497,28 +589,38 @@ def test_case_generator_interface():
         help="Automatically uses GPT-4-Vision for process map analysis. Requires Vision API access."
     )
     
+    # Model name mapping - UI names to actual model names
+    MODEL_MAPPING = {
+        "facto-tc": "gpt-3.5-turbo",
+        "facto-tc-new": "gpt-4",
+        "facto-visual": "gpt-4o"
+    }
+    
     # Model selection with smart defaults
     if enable_vision:
-        # If vision is enabled, default to gpt-4o but allow manual override
-        model_options = ["gpt-4o", "gpt-4", "gpt-4-vision-preview", "gpt-3.5-turbo"]
-        default_index = 0  # Default to gpt-4o when vision is enabled
-        help_text = "Vision analysis enabled - using GPT-4o (recommended) or select another model."
+        # If vision is enabled, default to facto-visual but allow manual override
+        model_display_options = ["facto-visual", "facto-tc-new", "facto-tc"]
+        default_index = 0  # Default to facto-visual when vision is enabled
+        help_text = "Vision analysis enabled - using facto-visual (recommended) or select another model."
     else:
         # Standard options when vision is disabled
-        model_options = ["gpt-3.5-turbo", "gpt-4o", "gpt-4"]
-        default_index = 0  # Default to gpt-3.5-turbo when vision is disabled
-        help_text = "Choose the AI model. GPT-3.5 is fastest and most reliable."
+        model_display_options = ["facto-tc", "facto-visual", "facto-tc-new"]
+        default_index = 0  # Default to facto-tc when vision is disabled
+        help_text = "Choose the AI model. facto-tc is fastest and most reliable."
     
-    model_choice = st.sidebar.selectbox(
+    model_display_choice = st.sidebar.selectbox(
         "AI Model",
-        model_options,
+        model_display_options,
         index=default_index,
         help=help_text
     )
     
+    # Map display name to actual model name
+    model_choice = MODEL_MAPPING[model_display_choice]
+    
     # Show info about vision capability
     if enable_vision and model_choice not in ["gpt-4", "gpt-4o", "gpt-4-vision-preview"]:
-        st.sidebar.warning("⚠️ Selected model may not support vision analysis. Consider GPT-4o for best results.")
+        st.sidebar.warning("⚠️ Selected model may not support vision analysis. Consider facto-visual for best results.")
     
     # Target system selection
     st.sidebar.markdown("---")
@@ -573,6 +675,52 @@ def test_case_generator_interface():
     
     st.sidebar.markdown("---")
     
+    # Template Upload Section
+    st.header("📋 Template Configuration (Optional)")
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.subheader("Upload Test Case Template")
+        template_file = st.file_uploader(
+            "Upload your template (Excel/CSV)",
+            type=['xlsx', 'xls', 'csv'],
+            help="Upload a template file with your preferred column structure for test cases (e.g., Jira format)"
+        )
+        
+        template_structure = None
+        if template_file:
+            with st.spinner("Analyzing template structure..."):
+                template_structure = extract_template_structure(template_file)
+                
+            if template_structure:
+                st.success(f"✅ Template loaded with {template_structure['column_count']} columns")
+                with st.expander("📊 Template Structure Preview"):
+                    st.write("**Columns detected:**")
+                    for i, col in enumerate(template_structure['columns'], 1):
+                        st.write(f"{i}. {col}")
+            else:
+                st.error("❌ Could not read template structure")
+    
+    with col2:
+        st.subheader("Additional Context")
+        additional_context = st.text_area(
+            "Add specific instructions or requirements",
+            placeholder="""Examples:
+• Focus on edge cases for payment processing
+• Include security test cases for authentication
+• Prioritize performance testing scenarios
+• Add data validation test cases
+• Include specific business rules to test
+• Test for specific user roles: Admin, Manager, User""",
+            height=200,
+            help="Provide any additional context, requirements, or specific instructions for test case generation"
+        )
+        
+        if additional_context:
+            char_count = len(additional_context)
+            st.caption(f"📝 {char_count} characters")
+    
     # File upload section
     st.header("📁 Upload Documents")
     
@@ -592,6 +740,14 @@ def test_case_generator_interface():
                 file_type = "🖼️ Process Map" if file.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')) else "📄 Document"
                 st.write(f"{file_type} **{file.name}** ({file.size:,} bytes)")
         
+        # Show configuration summary
+        with st.expander("⚙️ Generation Configuration"):
+            st.write(f"**Model:** {model_display_choice}")
+            st.write(f"**Target System:** {target_system}")
+            st.write(f"**Output Format:** {output_format}")
+            st.write(f"**Template:** {'Custom template' if template_structure else 'Default structure'}")
+            st.write(f"**Additional Context:** {'Yes ({} chars)'.format(len(additional_context)) if additional_context else 'None'}")
+        
         # Process files button
         if st.button("🚀 Generate Test Cases", type="primary"):
             
@@ -610,7 +766,15 @@ def test_case_generator_interface():
                     st.info("⏳ Waiting to respect API rate limits...")
                     time.sleep(2)  # 2-second delay between files
                 
-                test_cases, error = process_uploaded_file(uploaded_file, output_format, model_choice, enable_vision, target_system)
+                test_cases, error = process_uploaded_file(
+                    uploaded_file, 
+                    output_format, 
+                    model_choice, 
+                    enable_vision, 
+                    target_system,
+                    additional_context,
+                    template_structure
+                )
                 
                 if error:
                     st.error(f"❌ Error processing {uploaded_file.name}: {error}")
