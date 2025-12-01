@@ -196,13 +196,13 @@ def init_super_admin():
     user_manager = UserManager()
     
     # Debug info
-    st.write("🔧 Debug: Initializing super admin...")
-    st.write(f"🔧 Debug: Firestore client available: {user_manager.db is not None}")
+    # st.write("🔧 Debug: Initializing super admin...")
+    # st.write(f"🔧 Debug: Firestore client available: {user_manager.db is not None}")
     
     # Check if super admin exists
     super_admin_email = "admin@facto.com.au"  # Change this to your email
     existing_user = user_manager.get_user(super_admin_email)
-    st.write(f"🔧 Debug: Existing user check: {existing_user is not None}")
+    # st.write(f"🔧 Debug: Existing user check: {existing_user is not None}")
     
     if not existing_user:
         # Create super admin with default password

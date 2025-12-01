@@ -547,14 +547,17 @@ def main_app():
     
     # Navigation menu
     if has_permission('admin'):
-        nav_options = ["🧪 Test Case Generator", "👥 User Management"]
+        nav_options = ["🧪 Test Case Generator", "🤖 Automation Generator", "👥 User Management"]
     else:
-        nav_options = ["🧪 Test Case Generator"]
+        nav_options = ["🧪 Test Case Generator", "🤖 Automation Generator"]
     
     selected_nav = st.sidebar.radio("Select Section:", nav_options)
     
     if selected_nav == "👥 User Management":
         user_management_panel()
+        return
+    elif selected_nav == "🤖 Automation Generator":
+        st.switch_page("pages/automation_generator.py")
         return
     
     # Main test case generator interface
