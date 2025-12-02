@@ -167,127 +167,343 @@ def encode_image_to_base64(filepath) -> str:
     with open(filepath, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-def get_automation_system_prompt(language: str, framework: str, selector_strategy: str, page_object: bool) -> str:
-    """Generate system prompt for automation code generation"""
+def extract_code_from_file(uploaded_file) -> tuple:
+    """Extract code content from uploaded JS/TS/Python reference files"""
+    try:
+        # Read file content as text
+        content = uploaded_file.getvalue().decode('utf-8')
+        file_name = uploaded_file.name
+        file_ext = file_name.split('.')[-1].lower()
+        
+        # Identify file type
+        file_type_map = {
+            'js': 'JavaScript',
+            'ts': 'TypeScript',
+            'py': 'Python'
+        }
+        
+        file_type = file_type_map.get(file_ext, 'Unknown')
+        
+        return {
+            'content': content,
+            'filename': file_name,
+            'file_type': file_type,
+            'extension': file_ext
+        }, None
+        
+    except UnicodeDecodeError:
+        return None, f"Unable to read {uploaded_file.name}. File might be binary or use unsupported encoding."
+    except Exception as e:
+        return None, f"Error reading file {uploaded_file.name}: {str(e)}"
+
+def analyze_reference_code(reference_files: list) -> dict:
+    """Analyze reference code files and extract key patterns"""
+    analysis = {
+        'has_pom': False,
+        'classes': [],
+        'methods': [],
+        'locators': [],
+        'imports': [],
+        'patterns': []
+    }
     
-    base_prompt = f"""You are an expert test automation engineer specializing in {language} with {framework}.
+    all_content = ""
+    
+    for ref_file in reference_files:
+        content = ref_file['content']
+        all_content += f"\n\n--- {ref_file['filename']} ---\n{content}"
+        
+        # Detect Page Object Model patterns
+        if 'class' in content.lower() and ('page' in content.lower() or 'pom' in content.lower()):
+            analysis['has_pom'] = True
+        
+        # Extract class names (simplified)
+        import re
+        
+        # Python/JS/TS class patterns
+        class_pattern = r'class\s+(\w+)'
+        classes = re.findall(class_pattern, content)
+        analysis['classes'].extend(classes)
+        
+        # Method/function patterns
+        method_patterns = [
+            r'def\s+(\w+)',  # Python
+            r'async\s+(\w+)',  # JS/TS async
+            r'function\s+(\w+)',  # JS function
+            r'(\w+)\s*\([^)]*\)\s*{',  # JS/TS method
+        ]
+        
+        for pattern in method_patterns:
+            methods = re.findall(pattern, content)
+            analysis['methods'].extend(methods)
+        
+        # Common locator patterns
+        locator_patterns = [
+            r'data-testid["\s]*[:=]["\s]*([^"]+)',
+            r'#(\w+)',  # ID selectors
+            r'\.(\w+)',  # Class selectors
+        ]
+        
+        for pattern in locator_patterns:
+            locators = re.findall(pattern, content)
+            analysis['locators'].extend(locators)
+    
+    return analysis, all_content
 
-Your task is to generate production-ready test automation code following these specifications:
+def get_automation_system_prompt(
+    language: str, 
+    framework: str, 
+    selector_strategy: str, 
+    page_object: bool,
+    reference_context: str = None
+) -> str:
+    """Generate optimized system prompt for automation code generation"""
+    
+    base_prompt = f"""You are an expert test automation engineer with deep expertise in {language} and {framework}.
 
-**Language & Framework:** {language} with {framework}
-**Selector Strategy:** {selector_strategy}
-**Architecture:** {'Page Object Model (POM)' if page_object else 'Direct test implementation'}
+Your mission: Generate production-ready, maintainable test automation code that follows industry best practices.
 
-**Code Requirements:**
-1. Generate complete, runnable code with all necessary imports
-2. Include proper setup/teardown methods
-3. Use {selector_strategy} for element selectors
-4. Add meaningful assertions and validation
-5. Include error handling and wait strategies
-6. Add clear comments explaining test logic
-7. Follow best practices for {framework}
-8. Make code maintainable and scalable
+**TECHNICAL SPECIFICATIONS:**
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Language: {language}
+• Framework: {framework}
+• Selector Strategy: {selector_strategy}
+• Architecture: {'Page Object Model (POM)' if page_object else 'Direct test implementation'}
 
+**CORE REQUIREMENTS:**
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. CODE COMPLETENESS
+   - Include ALL necessary imports and dependencies
+   - Provide complete setup/teardown with proper cleanup
+   - Make code immediately runnable (copy-paste ready)
+
+2. RELIABILITY & RESILIENCE
+   - Implement smart waiting strategies (avoid hard sleeps)
+   - Add comprehensive error handling with meaningful messages
+   - Include retry logic for flaky operations
+   - Handle edge cases and race conditions
+
+3. MAINTAINABILITY
+   - Use {selector_strategy} consistently for element selection
+   - Write self-documenting code with clear naming
+   - Add comments only for complex logic
+   - Follow {framework} conventions and idioms
+
+4. ASSERTIONS & VALIDATION
+   - Add meaningful, descriptive assertions
+   - Validate both positive and negative scenarios
+   - Check element states (visible, enabled, text content)
+   - Include soft assertions where appropriate
+
+5. DEBUGGING & OBSERVABILITY
+   - Add strategic logging at key checkpoints
+   - Include screenshots on failure
+   - Provide clear failure messages
+   - Add test metadata (tags, descriptions)
 """
 
-    # Add framework-specific guidelines
+    # Framework-specific optimizations
     if framework == "Playwright":
         base_prompt += """
-**Playwright-Specific Requirements:**
-- Use async/await patterns
-- Implement proper page fixtures
-- Add auto-waiting strategies
-- Include screenshot on failure
-- Use page.locator() for element selection
-- Add trace collection for debugging
+**PLAYWRIGHT BEST PRACTICES:**
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Use auto-waiting features (page.locator() waits automatically)
+• Implement page fixtures for reusability
+• Leverage built-in assertions (expect(locator).toBeVisible())
+• Use page.waitForLoadState() for navigation
+• Enable tracing for debugging (context.tracing.start())
+• Utilize parallel execution capabilities
+• Take screenshots: await page.screenshot()
+• Use strict mode for selectors
+
+Example Pattern:
+```typescript
+await expect(page.locator('[data-testid="submit"]')).toBeVisible();
+await page.locator('[data-testid="submit"]').click();
+```
 """
     elif framework == "Selenium":
         base_prompt += """
-**Selenium-Specific Requirements:**
-- Use WebDriverWait for explicit waits
-- Implement proper driver management
-- Add implicit/explicit wait strategies
-- Include try-except for stability
-- Use appropriate By locators
+**SELENIUM BEST PRACTICES:**
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Use WebDriverWait with ExpectedConditions
+• Implement proper driver lifecycle management
+• Add explicit waits over implicit waits
+• Use By locators appropriately
+• Handle stale elements gracefully
+• Implement WebDriver singleton pattern
+• Take screenshots on failure
+• Clear cookies/cache between tests
+
+Example Pattern:
+```python
+wait = WebDriverWait(driver, 10)
+element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, '[data-testid="submit"]')))
+element.click()
+```
+"""
+    elif framework == "Cypress":
+        base_prompt += """
+**CYPRESS BEST PRACTICES:**
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Use cy.intercept() for API mocking
+• Leverage automatic waiting and retry
+• Use custom commands for reusability
+• Implement proper test isolation
+• Use data-* attributes for selectors
+• Add aliases for commonly used elements
+• Use .should() for assertions
+
+Example Pattern:
+```javascript
+cy.get('[data-testid="submit"]')
+  .should('be.visible')
+  .and('be.enabled')
+  .click();
+```
 """
     elif framework == "Pytest":
         base_prompt += """
-**Pytest-Specific Requirements:**
-- Use pytest fixtures for setup/teardown
-- Add parametrize for data-driven tests
-- Include proper assertions with messages
-- Use conftest.py patterns
-- Add markers for test categorization
+**PYTEST BEST PRACTICES:**
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Use fixtures for setup/teardown
+• Implement parametrize for data-driven tests
+• Add markers for test categorization (@pytest.mark.smoke)
+• Use conftest.py for shared fixtures
+• Leverage pytest-html for reporting
+• Add docstrings for test documentation
+• Use assert with descriptive messages
+
+Example Pattern:
+```python
+@pytest.fixture
+def browser():
+    # setup
+    yield driver
+    # teardown
+```
 """
-    elif framework == "Robot Framework":
-        base_prompt += """
-**Robot Framework-Specific Requirements:**
-- Use keyword-driven approach
-- Create reusable keywords
-- Include proper test setup/teardown
-- Add clear test documentation
-- Use proper variable conventions
-"""
-    
+
     if page_object:
         base_prompt += """
-**Page Object Model Requirements:**
-- Create separate page classes
-- Encapsulate locators in page objects
-- Define action methods in page classes
-- Keep tests clean and readable
-- Make pages reusable
+**PAGE OBJECT MODEL (POM) ARCHITECTURE:**
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Separate Concerns: One class per page/component
+• Encapsulate Locators: Store all selectors in page classes
+• Action Methods: Create methods for user interactions
+• Return New Pages: Methods that navigate should return page objects
+• Keep Tests Clean: Tests should read like user stories
+• Reusability: Make page objects reusable across tests
+
+Structure:
+```
+pages/
+  ├── base_page.py (common methods)
+  ├── login_page.py
+  └── dashboard_page.py
+tests/
+  └── test_login.py (uses page objects)
+```
 """
-    
+
     base_prompt += f"""
-**Selector Strategy ({selector_strategy}):**
+**SELECTOR STRATEGY: {selector_strategy}**
+━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
     
     if selector_strategy == "data-testid":
-        base_prompt += """- Prefer data-testid attributes for stable selectors
-- Use format: [data-testid="element-name"]
-- Generate suggested data-testid values
+        base_prompt += """• PREFER: [data-testid="element-name"] attributes
+• Use descriptive, semantic names
+• Suggest data-testid values if not provided in UI
+• Format: [data-testid="feature-action-element"]
+  Examples: [data-testid="login-submit-button"]
+            [data-testid="user-profile-dropdown"]
 """
     elif selector_strategy == "CSS":
-        base_prompt += """- Use CSS selectors with proper specificity
-- Prefer class and id selectors
-- Avoid overly complex selectors
+        base_prompt += """• Use CSS selectors with appropriate specificity
+• Prefer: ID > Class > Tag
+• Avoid overly complex selectors
+• Use child combinators (>) over descendant
+• Leverage attribute selectors: [type="submit"]
 """
     elif selector_strategy == "XPath":
-        base_prompt += """- Use robust XPath expressions
-- Prefer relative XPath over absolute
-- Include text-based locators when appropriate
+        base_prompt += """• Use relative XPath over absolute
+• Leverage text content: //button[text()='Submit']
+• Use contains() for partial matches
+• Avoid brittle paths with multiple levels
+• Consider axes: following-sibling, parent, ancestor
+"""
+
+    # Add reference code context if provided
+    if reference_context:
+        base_prompt += f"""
+**REFERENCE CODE PROVIDED:**
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+The user has provided reference code files (POM classes, utilities, etc.) that should inform your implementation.
+Follow the patterns, naming conventions, and structure from these reference files.
+
+{reference_context}
+
+IMPORTANT: Use the patterns, class structures, and coding style from the reference code above.
 """
     
     return base_prompt
 
-def get_automation_user_prompt(test_description: str, context_text: str = "", framework: str = "Playwright") -> str:
-    """Generate user prompt for automation code generation"""
+def get_automation_user_prompt(
+    test_description: str, 
+    context_text: str = "", 
+    framework: str = "Playwright",
+    reference_summary: dict = None
+) -> str:
+    """Generate optimized user prompt for automation code generation"""
     
-    prompt = f"""Generate test automation code for the following scenario:
+    prompt = f"""**TEST AUTOMATION REQUEST**
 
+**Scenario to Automate:**
 {test_description}
+"""
+    
+    if reference_summary and reference_summary.get('has_pom'):
+        prompt += f"""
+**Reference Code Analysis:**
+- Page Object Model detected: Yes
+- Classes found: {', '.join(reference_summary.get('classes', [])[:5])}
+- Key methods: {', '.join(reference_summary.get('methods', [])[:10])}
+
+Please follow the Page Object Model structure from the reference code.
 """
     
     if context_text:
         prompt += f"""
-
-**Additional Context/Requirements:**
+**Additional Requirements:**
 {context_text}
 """
     
-    prompt += f"""
+    prompt += """
+**DELIVERABLES:**
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Generate complete, production-ready code with:
 
-**Output Requirements:**
-1. Generate complete, production-ready code
-2. Include all necessary imports and setup
-3. Add clear comments and documentation
-4. Implement proper wait strategies
-5. Include meaningful test assertions
-6. Add error handling
-7. Make code copy-paste ready
+1. ✅ All imports and setup code
+2. ✅ Page Object classes (if using POM)
+3. ✅ Test class/function with proper structure
+4. ✅ Setup and teardown methods
+5. ✅ Wait strategies for all interactions
+6. ✅ Comprehensive assertions with messages
+7. ✅ Error handling and logging
+8. ✅ Comments for complex logic only
+9. ✅ Code formatting following best practices
 
-Please provide the complete code implementation.
+**CODE QUALITY CHECKLIST:**
+- [ ] No hardcoded waits (sleep/Thread.sleep)
+- [ ] All interactions have explicit waits
+- [ ] Assertions include descriptive messages
+- [ ] Error handling for potential failures
+- [ ] Code is immediately runnable
+- [ ] Follows framework conventions
+- [ ] Uses recommended patterns
+
+Please provide the complete implementation now.
 """
     
     return prompt
@@ -300,13 +516,34 @@ def generate_automation_code(
     page_object: bool,
     context_text: str = "",
     image_base64: str = None,
+    reference_files: list = None,
     model: str = "gpt-4o"
 ) -> tuple:
-    """Generate automation code using OpenAI API"""
+    """Generate automation code using OpenAI API with reference code support"""
     
     try:
-        system_prompt = get_automation_system_prompt(language, framework, selector_strategy, page_object)
-        user_prompt = get_automation_user_prompt(test_description, context_text, framework)
+        # Process reference files if provided
+        reference_context = None
+        reference_summary = None
+        
+        if reference_files:
+            reference_summary, reference_context = analyze_reference_code(reference_files)
+        
+        # Build prompts with reference context
+        system_prompt = get_automation_system_prompt(
+            language, 
+            framework, 
+            selector_strategy, 
+            page_object,
+            reference_context
+        )
+        
+        user_prompt = get_automation_user_prompt(
+            test_description, 
+            context_text, 
+            framework,
+            reference_summary
+        )
         
         messages = [
             {"role": "system", "content": system_prompt}
@@ -333,14 +570,14 @@ def generate_automation_code(
                 "content": user_prompt
             })
         
-        response = openai.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model=model,
             messages=messages,
             temperature=0.7,
             max_tokens=4000
         )
         
-        code = response.choices[0].message.content
+        code = response['choices'][0]['message']['content']
         return code, None
         
     except Exception as e:
@@ -402,101 +639,115 @@ def get_language_for_code_block(language: str) -> str:
     }
     return mapping.get(language, "text")
 
-# --- Main Application ---
 def main_app():
-    """Main automation generator interface"""
+    """Main application interface"""
     
-    # Sidebar
-    st.sidebar.title("🤖 Automation Generator")
+    st.title("🤖 Facto AI - Automation Code Generator")
+    st.markdown("Generate production-ready test automation code from requirements, screenshots, or descriptions")
     
+    # Sidebar configuration
+    st.sidebar.header("⚙️ Configuration")
+    
+    # User info
     user_data = get_current_user()
     if user_data:
-        st.sidebar.write(f"👤 **{user_data.get('email', 'User')}**")
-        st.sidebar.write(f"🎭 Role: **{user_data.get('role', 'user').title()}**")
+        st.sidebar.success(f"👤 {user_data.get('email', 'User')}")
+        st.sidebar.caption(f"Role: {user_data.get('role', 'user').replace('_', ' ').title()}")
+        
+        if st.sidebar.button("🚪 Logout"):
+            logout()
     
-    st.sidebar.markdown("---")
+    # Model selection
+    model_options = {
+        "GPT-4o (Recommended)": "gpt-4o",
+        "GPT-4o-mini (Faster)": "gpt-4o-mini",
+        "GPT-4 Turbo": "gpt-4-turbo-preview"
+    }
     
-    # Navigation
-    st.sidebar.subheader("📱 Navigation")
-    if st.sidebar.button("🧪 Test Case Generator"):
-        st.switch_page("app.py")
-    
-    if has_permission('admin'):
-        if st.sidebar.button("👥 User Management"):
-            st.session_state.show_user_management = True
-            st.rerun()
-    
-    if st.sidebar.button("🚪 Logout"):
-        logout()
-    
-    st.sidebar.markdown("---")
-    
-    # Configuration Section
-    st.sidebar.subheader("⚙️ Configuration")
+    model_display_choice = st.sidebar.selectbox(
+        "AI Model",
+        options=list(model_options.keys()),
+        index=0,
+        help="GPT-4o is recommended for best code quality"
+    )
+    model_choice = model_options[model_display_choice]
     
     # Language selection
     language = st.sidebar.selectbox(
         "Programming Language",
-        ["JavaScript", "TypeScript", "Python"],
-        help="Select the programming language for generated code"
+        ["Python", "JavaScript", "TypeScript"],
+        help="Select your preferred automation language"
     )
     
     # Framework selection based on language
     framework_options = {
-        "JavaScript": ["Playwright", "Selenium WebDriver", "Cypress", "Puppeteer"],
-        "TypeScript": ["Playwright", "Selenium WebDriver", "Cypress", "Puppeteer"],
-        "Python": ["Playwright", "Selenium WebDriver", "Pytest", "Robot Framework"]
+        "Python": ["Playwright", "Selenium", "Pytest", "Robot Framework"],
+        "JavaScript": ["Playwright", "Cypress", "WebDriverIO", "TestCafe"],
+        "TypeScript": ["Playwright", "Cypress", "WebDriverIO", "TestCafe"]
     }
     
     framework = st.sidebar.selectbox(
         "Testing Framework",
         framework_options[language],
-        help="Select the testing framework"
+        help="Select your testing framework"
     )
     
     # Selector strategy
     selector_strategy = st.sidebar.selectbox(
         "Selector Strategy",
-        ["data-testid", "CSS", "XPath", "ID/Class"],
-        help="Preferred method for element selection"
+        ["data-testid", "CSS", "XPath"],
+        help="Preferred method for locating elements"
     )
     
     # Page Object Model
     page_object = st.sidebar.checkbox(
-        "Use Page Object Model",
+        "Use Page Object Model (POM)",
         value=True,
-        help="Generate code using Page Object Model pattern"
-    )
-    
-    # Model selection
-    model_choice = st.sidebar.selectbox(
-        "AI Model",
-        ["gpt-4o", "gpt-4o-mini"],
-        help="Select OpenAI model (gpt-4o recommended for complex scenarios)"
+        help="Generate code using Page Object Model pattern for better maintainability"
     )
     
     st.sidebar.markdown("---")
     
-    # Clear temp files button
+    # Reference Files Upload Section (NEW FEATURE)
+    st.sidebar.header("📎 Reference Files")
+    st.sidebar.markdown("Upload existing POM files or utilities as reference")
+    
+    reference_files_uploaded = st.sidebar.file_uploader(
+        "Upload Reference Code (Optional)",
+        type=['js', 'ts', 'py'],
+        accept_multiple_files=True,
+        help="Upload your Page Object Model files, utility classes, or helper functions to use as reference",
+        key="reference_files"
+    )
+    
+    reference_files_data = []
+    if reference_files_uploaded:
+        st.sidebar.success(f"✅ {len(reference_files_uploaded)} reference file(s) uploaded")
+        
+        with st.sidebar.expander("📋 Reference Files Details"):
+            for ref_file in reference_files_uploaded:
+                file_data, error = extract_code_from_file(ref_file)
+                if error:
+                    st.error(f"❌ {error}")
+                else:
+                    reference_files_data.append(file_data)
+                    st.write(f"📄 **{file_data['filename']}** ({file_data['file_type']})")
+                    st.caption(f"{len(file_data['content'])} characters")
+    
+    st.sidebar.markdown("---")
+    
+    # Clean temp files button
     if st.sidebar.button("🗑️ Clear Temp Files"):
         cleanup_temp_files()
         st.sidebar.success("✅ Temp files cleared!")
         st.rerun()
     
-    # Main content
-    st.title("🤖 Test Automation Code Generator")
-    st.markdown("Generate production-ready test automation code from descriptions or UI screenshots")
-    
-    # Show user management panel if requested
-    if st.session_state.get('show_user_management', False):
-        user_management_panel()
-        if st.button("← Back to Automation Generator"):
-            st.session_state.show_user_management = False
-            st.rerun()
-        return
-    
-    # Input method tabs
-    tab1, tab2, tab3 = st.tabs(["📝 Text Description", "🖼️ UI Screenshot", "📄 Document + Screenshot"])
+    # Main content area with tabs
+    tab1, tab2, tab3 = st.tabs([
+        "📝 Text Description", 
+        "🖼️ Screenshot Upload", 
+        "📄 Document + Screenshot"
+    ])
     
     with tab1:
         st.subheader("Describe Your Test Scenario")
@@ -504,46 +755,47 @@ def main_app():
         test_description = st.text_area(
             "Test Scenario Description",
             placeholder="""Example:
-Test user login functionality:
-1. Navigate to login page at /login
-2. Enter valid username and password
+Test the login functionality:
+1. Navigate to login page
+2. Enter valid credentials (username: testuser, password: Test123!)
 3. Click login button
 4. Verify user is redirected to dashboard
-5. Verify welcome message is displayed""",
+5. Check that welcome message is displayed
+6. Test logout functionality""",
             height=200,
-            help="Describe the test scenario in detail"
+            help="Describe what you want to test in detail",
+            key="text_desc"
         )
         
         additional_context = st.text_area(
-            "Additional Requirements (Optional)",
+            "Additional Context/Requirements (Optional)",
             placeholder="""Examples:
-• Include test data setup
-• Add negative test cases
-• Test for specific error messages
-• Include accessibility checks
-• Add performance assertions""",
-            height=150
+• URL: https://app.example.com
+• Test data: Use credentials from config file
+• Handle 2FA flow
+• Add screenshot on failure
+• Test for mobile viewport""",
+            height=150,
+            key="text_context"
         )
         
-        if st.button("🚀 Generate Automation Code", key="gen_text", type="primary"):
-            if not test_description:
-                st.error("❌ Please provide a test scenario description")
-            else:
-                with st.spinner("Generating automation code..."):
-                    code, error = generate_automation_code(
-                        test_description=test_description,
-                        language=language,
-                        framework=framework,
-                        selector_strategy=selector_strategy,
-                        page_object=page_object,
-                        context_text=additional_context,
-                        model=model_choice
-                    )
-                    
-                    if error:
-                        st.error(f"❌ Error: {error}")
-                    else:
-                        display_generated_code(code, language, framework)
+        if test_description and st.button("🚀 Generate Code", key="gen_text", type="primary"):
+            with st.spinner("Generating automation code..."):
+                code, error = generate_automation_code(
+                    test_description=test_description,
+                    language=language,
+                    framework=framework,
+                    selector_strategy=selector_strategy,
+                    page_object=page_object,
+                    context_text=additional_context,
+                    reference_files=reference_files_data if reference_files_data else None,
+                    model=model_choice
+                )
+                
+                if error:
+                    st.error(f"❌ Error: {error}")
+                else:
+                    display_generated_code(code, language, framework)
     
     with tab2:
         st.subheader("Upload UI Screenshot")
@@ -598,6 +850,7 @@ Test user login functionality:
                             page_object=page_object,
                             context_text=additional_context,
                             image_base64=image_base64,
+                            reference_files=reference_files_data if reference_files_data else None,
                             model=model_choice
                         )
                         
@@ -680,6 +933,7 @@ Test user login functionality:
                         page_object=page_object,
                         context_text=combined_context,
                         image_base64=image_base64,
+                        reference_files=reference_files_data if reference_files_data else None,
                         model=model_choice
                     )
                     
